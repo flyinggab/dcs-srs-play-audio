@@ -1,7 +1,8 @@
 # Installs dcs-srs-play-audio for the current user (the one running the DCS server). Run it through install.cmd.
 # https://github.com/flyinggab/dcs-srs-play-audio (MIT license)
-# Options: -DcsProfile <folder>[,<folder>], -ExternalAudio <exe>, -SrsPort <port>, -NoTask (skip the scheduled task).
-param([string[]]$DcsProfile, [string]$ExternalAudio, [int]$SrsPort = 0, [switch]$NoTask)
+# Options: -DcsProfile <folder>[,<folder>], -ExternalAudio <exe>, -SrsPort <port>, -NoTask (skip the scheduled task),
+# -User <name> (install for another user, as administrator; nothing is asked).
+param([string[]]$DcsProfile, [string]$ExternalAudio, [int]$SrsPort = 0, [string]$User, [switch]$NoTask)
 $ErrorActionPreference = 'Stop'
 $name = 'dcs-srs-play-audio'
 $taskName = 'DCS SRS play audio'
@@ -14,18 +15,36 @@ Say 'dcs-srs-play-audio installer'
 Say ''
 Get-ChildItem -LiteralPath (Split-Path $here) -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 
-# DCS server profiles
-if (-not $DcsProfile) {
+# Whose DCS: this user, or -User
+if ($User) {
+    try { $sid = ([Security.Principal.NTAccount]$User).Translate([Security.Principal.SecurityIdentifier]).Value }
+    catch { Stop-Install "no such user: $User" }
+    $profileList = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+    $userHome = (Get-ItemProperty -LiteralPath $profileList -ErrorAction SilentlyContinue).ProfileImagePath
+    if (-not $userHome) { Stop-Install "$User has no profile on this computer yet (sign in once)" }
+    $userHome = [Environment]::ExpandEnvironmentVariables($userHome)
+    $localAppData = Join-Path $userHome 'AppData\Local'
+    $savedGames = Join-Path $userHome 'Saved Games'
+    $srsKey = "Registry::HKEY_USERS\$sid\SOFTWARE\DCS-SR-Standalone"   # there while the user is signed in
+    $taskUser = $User
+} else {
+    $localAppData = $env:LOCALAPPDATA
     $savedGames = Join-Path $env:USERPROFILE 'Saved Games'
     $shellFolders = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
     $known = (Get-ItemProperty -LiteralPath $shellFolders -ErrorAction SilentlyContinue).'{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}'
     if ($known) { $savedGames = [Environment]::ExpandEnvironmentVariables($known) }
+    $srsKey = 'HKCU:\SOFTWARE\DCS-SR-Standalone'
+    $taskUser = "$env:USERDOMAIN\$env:USERNAME"
+}
+
+# DCS server profiles
+if (-not $DcsProfile) {
     $DcsProfile = @(Get-ChildItem -LiteralPath $savedGames -Directory -Filter 'DCS*' -ErrorAction SilentlyContinue |
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Config\serverSettings.lua') } |
         ForEach-Object { $_.FullName })
     if (-not $DcsProfile) {
-        Stop-Install ("no DCS server profile found in $savedGames. Start the DCS server once as this user, or use " +
-                      '-DcsProfile <folder>.')
+        Stop-Install ("no DCS server profile found in $savedGames. Start the DCS server once as the user who runs " +
+                      'it, or use -DcsProfile <folder>.')
     }
 }
 foreach ($p in $DcsProfile) { if (-not (Test-Path -LiteralPath $p)) { Stop-Install "no such folder: $p" } }
@@ -34,7 +53,7 @@ Say ('DCS profiles: ' + ($DcsProfile -join ', '))
 # External Audio and .NET
 if (-not $ExternalAudio) {
     $candidates = @()
-    $srs = (Get-ItemProperty -LiteralPath 'HKCU:\SOFTWARE\DCS-SR-Standalone' -ErrorAction SilentlyContinue).SRPathStandalone
+    $srs = (Get-ItemProperty -LiteralPath $srsKey -ErrorAction SilentlyContinue).SRPathStandalone
     if ($srs) { $candidates += Join-Path $srs 'ExternalAudio\DCS-SR-ExternalAudio.exe' }
     $candidates += Join-Path $env:ProgramFiles 'DCS-SimpleRadio-Standalone\ExternalAudio\DCS-SR-ExternalAudio.exe'
     $candidates += 'C:\ProgramData\srs-server\ExternalAudio\DCS-SR-ExternalAudio.exe'
@@ -63,7 +82,8 @@ if ($problem -eq 'dotnet') {
     Say ''
     Say 'External Audio needs the .NET Desktop Runtime 10 (x64), which is not installed.'
     $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget -and (Read-Host 'Install it with winget now? Windows will ask for admin rights. [y/N]') -match '^[yY]') {
+    if (-not $User -and $winget -and
+        (Read-Host 'Install it with winget now? Windows will ask for admin rights. [y/N]') -match '^[yY]') {
         & $winget.Source install --id Microsoft.DotNet.DesktopRuntime.10 --exact --accept-source-agreements --accept-package-agreements
         $problem = Test-ExternalAudio
     }
@@ -80,12 +100,16 @@ foreach ($p in $DcsProfile) {
     $hooks = Join-Path $p 'Scripts\Hooks'
     New-Item -ItemType Directory -Force -Path $hooks | Out-Null
     Copy-Item -LiteralPath (Join-Path $here "$name.lua") -Destination (Join-Path $hooks "$name.lua") -Force
+    $cfg = Join-Path $p "Config\$name.cfg"
     $port = $SrsPort
-    if (-not $port -and $DcsProfile.Count -gt 1) {
+    if (-not $port -and (Test-Path -LiteralPath $cfg)) {   # installed before: keep its port
+        $line = Select-String -LiteralPath $cfg -Pattern '^\s*srsPort\s*=\s*(\d+)' | Select-Object -First 1
+        if ($line) { $port = [int]$line.Matches[0].Groups[1].Value }
+    }
+    if (-not $port -and -not $User -and $DcsProfile.Count -gt 1) {
         $answer = Read-Host "SRS port of the server $(Split-Path $p -Leaf) [5002]"
         if ($answer -match '^\d{1,5}$') { $port = [int]$answer }
     }
-    $cfg = Join-Path $p "Config\$name.cfg"
     if ($port -and $port -ne 5002) {
         if ($port -lt 1 -or $port -gt 65535) { Stop-Install "not a port: $port" }
         New-Item -ItemType Directory -Force -Path (Split-Path $cfg) | Out-Null
@@ -102,7 +126,7 @@ foreach ($p in $DcsProfile) {
 }
 
 # Helper and scheduled task
-$appFolder = Join-Path $env:LOCALAPPDATA $name
+$appFolder = Join-Path $localAppData $name
 New-Item -ItemType Directory -Force -Path $appFolder | Out-Null
 $helper = Join-Path $appFolder "$name.ps1"
 Copy-Item -LiteralPath (Join-Path $here "$name.ps1") -Destination $helper -Force
@@ -110,18 +134,17 @@ $config = [ordered]@{ externalAudio = $ExternalAudio; profiles = @($DcsProfile) 
 [IO.File]::WriteAllText((Join-Path $appFolder 'config.json'), ($config | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 Say "Helper: $helper"
 if (-not $NoTask) {
-    $user = "$env:USERDOMAIN\$env:USERNAME"
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
         -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$helper`""
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
-    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+    $principal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
         -Force | Out-Null
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    Start-ScheduledTask -TaskName $taskName
+    try { Start-ScheduledTask -TaskName $taskName } catch { Say "  (it starts when $taskUser signs in)" }
     Start-Sleep -Seconds 2
     Say "Scheduled task '$taskName': $((Get-ScheduledTask -TaskName $taskName).State)"
 }

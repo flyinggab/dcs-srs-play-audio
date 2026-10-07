@@ -41,7 +41,9 @@ You need a Windows DCS dedicated server with the SRS server on the same machine,
 The installer finds your DCS server profiles and External Audio, adds the hook to each profile and registers a
 scheduled task, "DCS SRS play audio", that runs the helper at logon.
 
-Options: `-DcsProfile <folder>`, `-ExternalAudio <path to exe>`, `-SrsPort <port>` if SRS isn't on 5002.
+Options: `-DcsProfile <folder>`, `-ExternalAudio <path to exe>`, `-SrsPort <port>` if SRS isn't on 5002 (kept when
+you install again), `-User <name>` to install for another user from an administrator account or a script (nothing is
+asked).
 
 To remove it, run `uninstall.cmd` and restart DCS.
 

@@ -1,10 +1,18 @@
 # Removes dcs-srs-play-audio for the current user. Run it through uninstall.cmd.
 # https://github.com/flyinggab/dcs-srs-play-audio (MIT license)
-param([string[]]$DcsProfile)
+# -User <name> removes it for another user (as administrator).
+param([string[]]$DcsProfile, [string]$User)
 $ErrorActionPreference = 'Stop'
 $name = 'dcs-srs-play-audio'
 $taskName = 'DCS SRS play audio'
-$appFolder = Join-Path $env:LOCALAPPDATA $name
+$localAppData = $env:LOCALAPPDATA
+if ($User) {
+    $sid = ([Security.Principal.NTAccount]$User).Translate([Security.Principal.SecurityIdentifier]).Value
+    $profileList = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+    $userHome = [Environment]::ExpandEnvironmentVariables((Get-ItemProperty -LiteralPath $profileList).ProfileImagePath)
+    $localAppData = Join-Path $userHome 'AppData\Local'
+}
+$appFolder = Join-Path $localAppData $name
 
 if (-not $DcsProfile) {
     $config = Join-Path $appFolder 'config.json'
